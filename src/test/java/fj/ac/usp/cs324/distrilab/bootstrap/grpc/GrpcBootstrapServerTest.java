@@ -98,4 +98,19 @@ class GrpcBootstrapServerTest {
                 () -> new GrpcBootstrapServer(65_536)
         );
     }
+
+    @Test
+    void startsAndStopsHealthMonitorWithServer()
+            throws Exception {
+
+        server = new GrpcBootstrapServer(0);
+
+        server.start();
+
+        assertTrue(server.isHealthMonitorRunning());
+
+        server.stop();
+
+        assertFalse(server.isHealthMonitorRunning());
+    }
 }

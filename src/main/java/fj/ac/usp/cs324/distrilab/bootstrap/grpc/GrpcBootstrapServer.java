@@ -15,11 +15,18 @@ public final class GrpcBootstrapServer implements AutoCloseable {
 
     private final int requestedPort;
     private final GrpcBootstrapService bootstrapService;
+    private final GrpcWorkerHealthMonitor healthMonitor;
 
     private Server server;
 
     public GrpcBootstrapServer(int port) {
-        this(port, new GrpcBootstrapService());
+        validatePort(port);
+
+        requestedPort = port;
+        bootstrapService = new GrpcBootstrapService();
+        healthMonitor = new GrpcWorkerHealthMonitor(
+                bootstrapService
+        );
     }
 
     GrpcBootstrapServer(
@@ -28,10 +35,15 @@ public final class GrpcBootstrapServer implements AutoCloseable {
     ) {
         validatePort(port);
 
-        this.requestedPort = port;
+        requestedPort = port;
+
         this.bootstrapService = Objects.requireNonNull(
                 bootstrapService,
                 "bootstrapService cannot be null"
+        );
+
+        healthMonitor = new GrpcWorkerHealthMonitor(
+                bootstrapService
         );
     }
 
@@ -47,12 +59,18 @@ public final class GrpcBootstrapServer implements AutoCloseable {
                 .addService(bootstrapService)
                 .build()
                 .start();
+
+        healthMonitor.start();
     }
 
     public synchronized boolean isRunning() {
         return server != null
                 && !server.isShutdown()
                 && !server.isTerminated();
+    }
+
+    public boolean isHealthMonitorRunning() {
+        return healthMonitor.isRunning();
     }
 
     public synchronized int getPort() {
@@ -80,6 +98,8 @@ public final class GrpcBootstrapServer implements AutoCloseable {
     }
 
     public synchronized void stop() {
+        healthMonitor.stop();
+
         if (server == null || server.isShutdown()) {
             return;
         }
@@ -142,6 +162,12 @@ public final class GrpcBootstrapServer implements AutoCloseable {
             );
             System.out.println(
                     "gRPC port: " + bootstrapServer.getPort()
+            );
+            System.out.println(
+                    "Worker health-check interval: 5 seconds"
+            );
+            System.out.println(
+                    "Failure threshold: 3 missed health checks"
             );
             System.out.println(
                     "Waiting for worker registrations..."
