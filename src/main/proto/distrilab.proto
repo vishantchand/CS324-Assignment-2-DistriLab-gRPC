@@ -1,0 +1,317 @@
+syntax = "proto3";
+
+package distrilab.v2;
+
+option java_multiple_files = true;
+option java_package = "fj.ac.usp.cs324.distrilab.grpc";
+option java_outer_classname = "DistriLabProto";
+
+// ============================================================
+// Enumerations
+// ============================================================
+
+enum JobType {
+  JOB_TYPE_UNSPECIFIED = 0;
+  JOB_TYPE_MAX = 1;
+  JOB_TYPE_PRIMESUM = 2;
+  JOB_TYPE_PRIMECOUNT = 3;
+}
+
+enum WorkerHealth {
+  WORKER_HEALTH_UNSPECIFIED = 0;
+  WORKER_HEALTH_ACTIVE = 1;
+  WORKER_HEALTH_SUSPECTED = 2;
+  WORKER_HEALTH_FAILED = 3;
+}
+
+enum JobState {
+  JOB_STATE_UNSPECIFIED = 0;
+  JOB_STATE_ACCEPTED = 1;
+  JOB_STATE_RUNNING = 2;
+  JOB_STATE_COMPLETED = 3;
+  JOB_STATE_FAILED = 4;
+  JOB_STATE_RECOVERING = 5;
+}
+
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;
+  TASK_STATE_PENDING = 1;
+  TASK_STATE_ASSIGNED = 2;
+  TASK_STATE_RUNNING = 3;
+  TASK_STATE_COMPLETED = 4;
+  TASK_STATE_FAILED = 5;
+  TASK_STATE_REASSIGNED = 6;
+}
+
+// ============================================================
+// Common messages
+// ============================================================
+
+message Empty {
+}
+
+message Acknowledgement {
+  bool success = 1;
+  string message = 2;
+}
+
+// ============================================================
+// Worker and Bootstrap messages
+// ============================================================
+
+message WorkerInfo {
+  int32 worker_id = 1;
+  string host = 2;
+  int32 grpc_port = 3;
+  string worker_name = 4;
+}
+
+message WorkerIdRequest {
+  int32 worker_id = 1;
+}
+
+message WorkerList {
+  repeated WorkerInfo workers = 1;
+}
+
+message RegisterWorkerReply {
+  bool success = 1;
+  string message = 2;
+  repeated WorkerInfo active_workers = 3;
+}
+
+message JoinNetworkRequest {
+  WorkerInfo worker = 1;
+}
+
+message JoinNetworkReply {
+  bool success = 1;
+  string message = 2;
+  repeated WorkerInfo neighbors = 3;
+  int32 coordinator_id = 4;
+  int64 coordinator_term = 5;
+}
+
+message HeartbeatRequest {
+  int32 sender_id = 1;
+  int32 known_coordinator_id = 2;
+  int64 coordinator_term = 3;
+  int64 timestamp_ms = 4;
+}
+
+message HeartbeatReply {
+  bool alive = 1;
+  WorkerInfo worker = 2;
+  WorkerHealth health = 3;
+  int32 coordinator_id = 4;
+  int64 coordinator_term = 5;
+  int64 timestamp_ms = 6;
+}
+
+message WorkerFailureReport {
+  int32 reporter_id = 1;
+  int32 failed_worker_id = 2;
+  int64 detected_at_ms = 3;
+  string reason = 4;
+}
+
+// ============================================================
+// Leader-election messages
+// ============================================================
+
+message ElectionRequest {
+  string election_id = 1;
+  int32 initiator_id = 2;
+  int32 candidate_id = 3;
+  int64 candidate_jac = 4;
+  int64 proposed_term = 5;
+}
+
+message ElectionReply {
+  bool accepted = 1;
+  string election_id = 2;
+  int32 candidate_id = 3;
+  int64 candidate_jac = 4;
+  int64 proposed_term = 5;
+  string message = 6;
+}
+
+message CoordinatorAnnouncement {
+  string election_id = 1;
+  int32 coordinator_id = 2;
+  int64 coordinator_jac = 3;
+  int64 coordinator_term = 4;
+  int64 announced_at_ms = 5;
+}
+
+// ============================================================
+// Job and task messages
+// ============================================================
+
+message JobRequest {
+  string job_id = 1;
+  JobType job_type = 2;
+  repeated int64 numbers = 3;
+  int64 range_start = 4;
+  int64 range_end = 5;
+}
+
+message JobSubmissionReply {
+  bool accepted = 1;
+  string job_id = 2;
+  string message = 3;
+  int32 coordinator_id = 4;
+  int64 coordinator_term = 5;
+}
+
+message JobIdRequest {
+  string job_id = 1;
+}
+
+message TaskRequest {
+  string job_id = 1;
+  string task_id = 2;
+  JobType job_type = 3;
+  repeated int64 numbers = 4;
+  int64 range_start = 5;
+  int64 range_end = 6;
+  int32 assigned_worker_id = 7;
+  int32 attempt = 8;
+  int64 coordinator_term = 9;
+  int64 total_work_units = 10;
+}
+
+message TaskProgress {
+  string job_id = 1;
+  string task_id = 2;
+  int32 worker_id = 3;
+  int64 completed_work_units = 4;
+  int64 total_work_units = 5;
+  double percentage = 6;
+  TaskState state = 7;
+  int64 partial_value = 8;
+  bool final_update = 9;
+  bool successful = 10;
+  string message = 11;
+  int64 coordinator_term = 12;
+}
+
+message WorkerProgress {
+  int32 worker_id = 1;
+  string task_id = 2;
+  int64 completed_work_units = 3;
+  int64 total_work_units = 4;
+  double percentage = 5;
+  TaskState state = 6;
+  int64 partial_value = 7;
+  string message = 8;
+}
+
+message JobProgress {
+  string job_id = 1;
+  JobState state = 2;
+  int64 completed_work_units = 3;
+  int64 total_work_units = 4;
+  double overall_percentage = 5;
+  repeated WorkerProgress worker_progress = 6;
+  int32 coordinator_id = 7;
+  int64 coordinator_term = 8;
+  string message = 9;
+}
+
+message JobResult {
+  string job_id = 1;
+  JobType job_type = 2;
+  int64 value = 3;
+  bool successful = 4;
+  string message = 5;
+}
+
+// ============================================================
+// Coordinator recovery messages
+// ============================================================
+
+message TaskSnapshot {
+  TaskRequest request = 1;
+  TaskState state = 2;
+  int32 assigned_worker_id = 3;
+  int64 completed_work_units = 4;
+  int64 total_work_units = 5;
+  int64 partial_value = 6;
+  int32 attempt = 7;
+  bool result_recorded = 8;
+}
+
+message JobSnapshot {
+  JobRequest request = 1;
+  JobState state = 2;
+  repeated TaskSnapshot tasks = 3;
+  int64 completed_work_units = 4;
+  int64 total_work_units = 5;
+  JobResult result = 6;
+}
+
+message CoordinatorStateSnapshot {
+  int32 coordinator_id = 1;
+  int64 coordinator_term = 2;
+  int64 version = 3;
+  repeated JobSnapshot jobs = 4;
+  int64 created_at_ms = 5;
+}
+
+message CoordinatorStateReply {
+  bool accepted = 1;
+  int64 stored_version = 2;
+  string message = 3;
+}
+
+// ============================================================
+// gRPC services
+// ============================================================
+
+service BootstrapService {
+  rpc RegisterWorker(WorkerInfo) returns (RegisterWorkerReply);
+  rpc UnregisterWorker(WorkerIdRequest) returns (Acknowledgement);
+  rpc ListActiveWorkers(Empty) returns (WorkerList);
+  rpc GetRandomWorker(Empty) returns (WorkerInfo);
+}
+
+service WorkerService {
+  rpc GetWorkerInfo(Empty) returns (WorkerInfo);
+  rpc Ping(HeartbeatRequest) returns (HeartbeatReply);
+
+  rpc AddNeighbor(WorkerInfo) returns (Acknowledgement);
+  rpc RemoveNeighbor(WorkerIdRequest) returns (Acknowledgement);
+  rpc ListNeighbors(Empty) returns (WorkerList);
+
+  rpc JoinNetwork(JoinNetworkRequest) returns (JoinNetworkReply);
+  rpc ReportWorkerFailure(WorkerFailureReport)
+      returns (Acknowledgement);
+}
+
+service ElectionService {
+  rpc ReceiveElection(ElectionRequest) returns (ElectionReply);
+  rpc AnnounceCoordinator(CoordinatorAnnouncement)
+      returns (Acknowledgement);
+  rpc CoordinatorHeartbeat(HeartbeatRequest)
+      returns (HeartbeatReply);
+}
+
+service JobService {
+  rpc SubmitJob(JobRequest) returns (JobSubmissionReply);
+
+  rpc ExecuteTask(TaskRequest) returns (stream TaskProgress);
+
+  rpc StreamJobProgress(JobIdRequest)
+      returns (stream JobProgress);
+
+  rpc GetJobStatus(JobIdRequest) returns (JobSnapshot);
+}
+
+service RecoveryService {
+  rpc ReplicateCoordinatorState(CoordinatorStateSnapshot)
+      returns (CoordinatorStateReply);
+
+  rpc GetCoordinatorState(Empty)
+      returns (CoordinatorStateSnapshot);
+}
