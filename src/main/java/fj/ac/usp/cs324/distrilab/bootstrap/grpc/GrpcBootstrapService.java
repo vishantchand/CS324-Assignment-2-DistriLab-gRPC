@@ -150,6 +150,27 @@ public final class GrpcBootstrapService
         responseObserver.onCompleted();
     }
 
+    public void registerWorkerLocally(WorkerInfo worker) {
+        if (!isValidWorker(worker)) {
+            throw new IllegalArgumentException(
+                    "Worker ID, host, port and name are required"
+            );
+        }
+
+        WorkerInfo existing = activeWorkers.putIfAbsent(
+                worker.getWorkerId(),
+                worker
+        );
+
+        if (existing != null && !existing.equals(worker)) {
+            throw new IllegalArgumentException(
+                    "Worker ID "
+                            + worker.getWorkerId()
+                            + " is already registered"
+            );
+        }
+    }
+
     public List<WorkerInfo> getActiveWorkersSnapshot() {
         List<WorkerInfo> workers =
                 new ArrayList<>(activeWorkers.values());
@@ -169,6 +190,19 @@ public final class GrpcBootstrapService
 
     public int getActiveWorkerCount() {
         return activeWorkers.size();
+    }
+
+    public boolean removeWorkerIfUnchanged(
+            WorkerInfo expectedWorker
+    ) {
+        if (expectedWorker == null) {
+            return false;
+        }
+
+        return removeWorkerIfUnchanged(
+                expectedWorker.getWorkerId(),
+                expectedWorker
+        );
     }
 
     public boolean removeWorkerIfUnchanged(
