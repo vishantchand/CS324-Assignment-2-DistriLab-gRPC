@@ -194,6 +194,7 @@ message TaskProgress {
   bool successful = 10;
   string message = 11;
   int64 coordinator_term = 12;
+  int32 attempt = 13;
 }
 
 message WorkerProgress {
@@ -217,6 +218,7 @@ message JobProgress {
   int32 coordinator_id = 7;
   int64 coordinator_term = 8;
   string message = 9;
+  JobResult result = 10;
 }
 
 message JobResult {
@@ -291,8 +293,10 @@ service WorkerService {
 
 service ElectionService {
   rpc ReceiveElection(ElectionRequest) returns (ElectionReply);
+
   rpc AnnounceCoordinator(CoordinatorAnnouncement)
       returns (Acknowledgement);
+
   rpc CoordinatorHeartbeat(HeartbeatRequest)
       returns (HeartbeatReply);
 }
@@ -300,12 +304,14 @@ service ElectionService {
 service JobService {
   rpc SubmitJob(JobRequest) returns (JobSubmissionReply);
 
-  rpc ExecuteTask(TaskRequest) returns (stream TaskProgress);
+  rpc ExecuteTask(TaskRequest)
+      returns (stream TaskProgress);
 
   rpc StreamJobProgress(JobIdRequest)
       returns (stream JobProgress);
 
-  rpc GetJobStatus(JobIdRequest) returns (JobSnapshot);
+  rpc GetJobStatus(JobIdRequest)
+      returns (JobSnapshot);
 }
 
 service RecoveryService {
