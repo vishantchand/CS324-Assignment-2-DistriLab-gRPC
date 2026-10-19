@@ -2,17 +2,23 @@ package fj.ac.usp.cs324.distrilab.worker.grpc;
 
 import fj.ac.usp.cs324.distrilab.common.model.JobRequest;
 import fj.ac.usp.cs324.distrilab.common.model.JobResult;
+import fj.ac.usp.cs324.distrilab.grpc.JobIdRequest;
+import fj.ac.usp.cs324.distrilab.grpc.JobProgress;
 import fj.ac.usp.cs324.distrilab.grpc.JobServiceGrpc;
+import fj.ac.usp.cs324.distrilab.grpc.JobSnapshot;
+import fj.ac.usp.cs324.distrilab.grpc.JobState;
 import fj.ac.usp.cs324.distrilab.grpc.TaskProgress;
 import fj.ac.usp.cs324.distrilab.grpc.TaskRequest;
 import fj.ac.usp.cs324.distrilab.grpc.TaskState;
 import fj.ac.usp.cs324.distrilab.worker.job.JobEngine;
+import fj.ac.usp.cs324.distrilab.worker.job.JobProgressTracker;
 import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
 
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class JobGrpcService
@@ -20,16 +26,53 @@ public final class JobGrpcService
 
     private final int workerId;
     private final JobEngine jobEngine;
+    private final JobProgressTracker progressTracker;
 
     public JobGrpcService(int workerId) {
-        this(workerId, new JobEngine());
+        this(
+                workerId,
+                new JobEngine(),
+                new JobProgressTracker()
+        );
     }
 
-    JobGrpcService(int workerId, JobEngine jobEngine) {
+    public JobGrpcService(
+            int workerId,
+            JobProgressTracker progressTracker
+    ) {
+        this(
+                workerId,
+                new JobEngine(),
+                progressTracker
+        );
+    }
+
+    JobGrpcService(
+            int workerId,
+            JobEngine jobEngine
+    ) {
+        this(
+                workerId,
+                jobEngine,
+                new JobProgressTracker()
+        );
+    }
+
+    JobGrpcService(
+            int workerId,
+            JobEngine jobEngine,
+            JobProgressTracker progressTracker
+    ) {
         this.workerId = workerId;
+
         this.jobEngine = Objects.requireNonNull(
                 jobEngine,
                 "Job engine cannot be null"
+        );
+
+        this.progressTracker = Objects.requireNonNull(
+                progressTracker,
+                "Progress tracker cannot be null"
         );
     }
 
@@ -44,12 +87,12 @@ public final class JobGrpcService
         );
 
         try {
-            validateRequest(request);
+            validateTaskRequest(request);
 
             JobRequest localRequest = toLocalRequest(request);
 
-            AtomicReference<JobEngine.CalculationProgress> latestProgress =
-                    new AtomicReference<>();
+            AtomicReference<JobEngine.CalculationProgress>
+                    latestProgress = new AtomicReference<>();
 
             JobResult result = jobEngine.executeJob(
                     localRequest,
@@ -62,20 +105,21 @@ public final class JobGrpcService
                             );
                         }
 
-                        // The completed update is sent once below with
-                        // final_update set to true.
                         if (progress.completedWorkUnits()
                                 < progress.totalWorkUnits()) {
 
-                            responseObserver.onNext(
-                                    createProgress(
-                                            request,
-                                            progress,
-                                            TaskState.TASK_STATE_RUNNING,
-                                            false,
-                                            false,
-                                            "Task is running"
-                                    )
+                            TaskProgress update = createProgress(
+                                    request,
+                                    progress,
+                                    TaskState.TASK_STATE_RUNNING,
+                                    false,
+                                    false,
+                                    "Task is running"
+                            );
+
+                            recordAndSendProgress(
+                                    update,
+                                    responseObserver
                             );
                         }
                     }
@@ -89,11 +133,12 @@ public final class JobGrpcService
                     latestProgress.get();
 
             if (finalProgress == null) {
-                finalProgress = new JobEngine.CalculationProgress(
-                        0L,
-                        determineTotalWorkUnits(request),
-                        0L
-                );
+                finalProgress =
+                        new JobEngine.CalculationProgress(
+                                0L,
+                                determineTotalWorkUnits(request),
+                                0L
+                        );
             }
 
             long finalValue = result.successful()
@@ -111,15 +156,18 @@ public final class JobGrpcService
                     ? TaskState.TASK_STATE_COMPLETED
                     : TaskState.TASK_STATE_FAILED;
 
-            responseObserver.onNext(
-                    createProgress(
-                            request,
-                            completedProgress,
-                            finalState,
-                            true,
-                            result.successful(),
-                            result.message()
-                    )
+            TaskProgress finalUpdate = createProgress(
+                    request,
+                    completedProgress,
+                    finalState,
+                    true,
+                    result.successful(),
+                    result.message()
+            );
+
+            recordAndSendProgress(
+                    finalUpdate,
+                    responseObserver
             );
 
             responseObserver.onCompleted();
@@ -127,27 +175,180 @@ public final class JobGrpcService
             if (!isCancelled(responseObserver)) {
                 responseObserver.onError(
                         Status.CANCELLED
-                                .withDescription(exception.getMessage())
+                                .withDescription(
+                                        exception.getMessage()
+                                )
                                 .asRuntimeException()
                 );
             }
         } catch (IllegalArgumentException exception) {
             responseObserver.onError(
                     Status.INVALID_ARGUMENT
-                            .withDescription(exception.getMessage())
+                            .withDescription(
+                                    exception.getMessage()
+                            )
                             .asRuntimeException()
             );
         } catch (RuntimeException exception) {
             responseObserver.onError(
                     Status.INTERNAL
-                            .withDescription("Task execution failed")
+                            .withDescription(
+                                    "Task execution failed"
+                            )
                             .withCause(exception)
                             .asRuntimeException()
             );
         }
     }
 
-    private void validateRequest(TaskRequest request) {
+    @Override
+    public void streamJobProgress(
+            JobIdRequest request,
+            StreamObserver<JobProgress> responseObserver
+    ) {
+        Objects.requireNonNull(
+                responseObserver,
+                "Response observer cannot be null"
+        );
+
+        try {
+            validateJobIdRequest(request);
+
+            AtomicBoolean streamClosed =
+                    new AtomicBoolean(false);
+
+            AtomicReference<AutoCloseable> subscription =
+                    new AtomicReference<>();
+
+            Object responseLock = new Object();
+
+            if (responseObserver
+                    instanceof ServerCallStreamObserver<?>
+                    serverObserver) {
+
+                serverObserver.setOnCancelHandler(() -> {
+                    streamClosed.set(true);
+                    closeSubscription(subscription.get());
+                });
+            }
+
+            AutoCloseable newSubscription =
+                    progressTracker.subscribe(
+                            request.getJobId(),
+                            progress -> {
+                                synchronized (responseLock) {
+                                    if (streamClosed.get()
+                                            || isCancelled(
+                                            responseObserver
+                                    )) {
+                                        streamClosed.set(true);
+
+                                        closeSubscription(
+                                                subscription.get()
+                                        );
+
+                                        return;
+                                    }
+
+                                    responseObserver.onNext(progress);
+
+                                    if (isFinalState(
+                                            progress.getState()
+                                    )) {
+                                        streamClosed.set(true);
+                                        responseObserver.onCompleted();
+
+                                        closeSubscription(
+                                                subscription.get()
+                                        );
+                                    }
+                                }
+                            }
+                    );
+
+            subscription.set(newSubscription);
+
+            if (streamClosed.get()) {
+                closeSubscription(newSubscription);
+            }
+        } catch (IllegalArgumentException exception) {
+            responseObserver.onError(
+                    Status.NOT_FOUND
+                            .withDescription(
+                                    exception.getMessage()
+                            )
+                            .asRuntimeException()
+            );
+        } catch (RuntimeException exception) {
+            responseObserver.onError(
+                    Status.INTERNAL
+                            .withDescription(
+                                    "Unable to stream job progress"
+                            )
+                            .withCause(exception)
+                            .asRuntimeException()
+            );
+        }
+    }
+
+    @Override
+    public void getJobStatus(
+            JobIdRequest request,
+            StreamObserver<JobSnapshot> responseObserver
+    ) {
+        Objects.requireNonNull(
+                responseObserver,
+                "Response observer cannot be null"
+        );
+
+        try {
+            validateJobIdRequest(request);
+
+            JobSnapshot snapshot =
+                    progressTracker.getSnapshot(
+                            request.getJobId()
+                    );
+
+            responseObserver.onNext(snapshot);
+            responseObserver.onCompleted();
+        } catch (IllegalArgumentException exception) {
+            responseObserver.onError(
+                    Status.NOT_FOUND
+                            .withDescription(
+                                    exception.getMessage()
+                            )
+                            .asRuntimeException()
+            );
+        } catch (RuntimeException exception) {
+            responseObserver.onError(
+                    Status.INTERNAL
+                            .withDescription(
+                                    "Unable to get job status"
+                            )
+                            .withCause(exception)
+                            .asRuntimeException()
+            );
+        }
+    }
+
+    public JobProgressTracker getProgressTracker() {
+        return progressTracker;
+    }
+
+    private void recordAndSendProgress(
+            TaskProgress progress,
+            StreamObserver<TaskProgress> responseObserver
+    ) {
+        if (progressTracker.containsJob(
+                progress.getJobId()
+        )) {
+            progressTracker.recordTaskProgress(progress);
+        }
+
+        responseObserver.onNext(progress);
+    }
+
+    private void validateTaskRequest(TaskRequest request) {
         if (request == null) {
             throw new IllegalArgumentException(
                     "Task request cannot be null"
@@ -173,22 +374,39 @@ public final class JobGrpcService
         }
     }
 
-    private JobRequest toLocalRequest(TaskRequest request) {
-        fj.ac.usp.cs324.distrilab.common.model.JobType jobType =
-                switch (request.getJobType()) {
-                    case JOB_TYPE_MAX ->
-                            fj.ac.usp.cs324.distrilab.common.model.JobType.MAX;
+    private void validateJobIdRequest(
+            JobIdRequest request
+    ) {
+        if (request == null
+                || request.getJobId().isBlank()) {
+            throw new IllegalArgumentException(
+                    "Job ID cannot be blank"
+            );
+        }
+    }
 
-                    case JOB_TYPE_PRIMESUM ->
-                            fj.ac.usp.cs324.distrilab.common.model.JobType.PRIMESUM;
+    private JobRequest toLocalRequest(
+            TaskRequest request
+    ) {
+        fj.ac.usp.cs324.distrilab.common.model.JobType
+                jobType = switch (request.getJobType()) {
 
-                    case JOB_TYPE_PRIMECOUNT ->
-                            fj.ac.usp.cs324.distrilab.common.model.JobType.PRIMECOUNT;
+            case JOB_TYPE_MAX ->
+                    fj.ac.usp.cs324.distrilab.common.model
+                            .JobType.MAX;
 
-                    default -> throw new IllegalArgumentException(
-                            "A valid job type is required"
-                    );
-                };
+            case JOB_TYPE_PRIMESUM ->
+                    fj.ac.usp.cs324.distrilab.common.model
+                            .JobType.PRIMESUM;
+
+            case JOB_TYPE_PRIMECOUNT ->
+                    fj.ac.usp.cs324.distrilab.common.model
+                            .JobType.PRIMECOUNT;
+
+            default -> throw new IllegalArgumentException(
+                    "A valid job type is required"
+            );
+        };
 
         return new JobRequest(
                 request.getJobId(),
@@ -207,14 +425,15 @@ public final class JobGrpcService
             boolean successful,
             String message
     ) {
-        double percentage = progress.totalWorkUnits() <= 0L
-                ? 0.0
-                : Math.min(
-                100.0,
-                progress.completedWorkUnits()
-                        * 100.0
-                        / progress.totalWorkUnits()
-        );
+        double percentage =
+                progress.totalWorkUnits() <= 0L
+                        ? 0.0
+                        : Math.min(
+                        100.0,
+                        progress.completedWorkUnits()
+                                * 100.0
+                                / progress.totalWorkUnits()
+                );
 
         return TaskProgress.newBuilder()
                 .setJobId(request.getJobId())
@@ -223,19 +442,29 @@ public final class JobGrpcService
                 .setCompletedWorkUnits(
                         progress.completedWorkUnits()
                 )
-                .setTotalWorkUnits(progress.totalWorkUnits())
+                .setTotalWorkUnits(
+                        progress.totalWorkUnits()
+                )
                 .setPercentage(percentage)
                 .setState(state)
-                .setPartialValue(progress.partialValue())
+                .setPartialValue(
+                        progress.partialValue()
+                )
                 .setFinalUpdate(finalUpdate)
                 .setSuccessful(successful)
-                .setMessage(message == null ? "" : message)
-                .setCoordinatorTerm(request.getCoordinatorTerm())
+                .setMessage(
+                        message == null ? "" : message
+                )
+                .setCoordinatorTerm(
+                        request.getCoordinatorTerm()
+                )
                 .setAttempt(request.getAttempt())
                 .build();
     }
 
-    private long determineTotalWorkUnits(TaskRequest request) {
+    private long determineTotalWorkUnits(
+            TaskRequest request
+    ) {
         return switch (request.getJobType()) {
             case JOB_TYPE_MAX, JOB_TYPE_PRIMECOUNT ->
                     request.getNumbersCount();
@@ -258,11 +487,31 @@ public final class JobGrpcService
         };
     }
 
+    private boolean isFinalState(JobState state) {
+        return state == JobState.JOB_STATE_COMPLETED
+                || state == JobState.JOB_STATE_FAILED;
+    }
+
     private boolean isCancelled(
-            StreamObserver<TaskProgress> responseObserver
+            StreamObserver<?> responseObserver
     ) {
         return responseObserver
-                instanceof ServerCallStreamObserver<?> serverObserver
+                instanceof ServerCallStreamObserver<?>
+                serverObserver
                 && serverObserver.isCancelled();
+    }
+
+    private void closeSubscription(
+            AutoCloseable subscription
+    ) {
+        if (subscription == null) {
+            return;
+        }
+
+        try {
+            subscription.close();
+        } catch (Exception ignored) {
+            // Closing a listener should not fail the RPC.
+        }
     }
 }
