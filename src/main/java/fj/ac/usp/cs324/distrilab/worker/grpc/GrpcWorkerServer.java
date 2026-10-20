@@ -68,10 +68,15 @@ public final class GrpcWorkerServer implements AutoCloseable {
                         coordinatorTerm::get
                 );
 
+        JobGrpcService jobService =
+                new JobGrpcService(workerId);
+
         server = ServerBuilder
                 .forPort(workerPort)
                 .addService(workerService)
+                .addService(jobService)
                 .build();
+
 
         bootstrapClient = new GrpcBootstrapClient(
                 bootstrapHost,
