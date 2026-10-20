@@ -143,4 +143,64 @@ class ElectionManagerTest {
         assertEquals(6, coordinatorMessage.coordinatorId());
         assertEquals(2, coordinatorMessage.coordinatorJac());
     }
+
+    @Test
+    void coordinatorWithNewerTermIsAccepted() {
+        ElectionManager manager = new ElectionManager(2, 3);
+
+        CoordinatorMessage message =
+                new CoordinatorMessage(
+                        "term-election-1",
+                        7,
+                        1
+                );
+
+        assertTrue(manager.receiveCoordinator(message, 2L));
+        assertEquals(2L, manager.getCoordinatorTerm());
+        assertEquals(7, manager.getCoordinatorId());
+    }
+
+    @Test
+    void coordinatorWithStaleTermIsRejected() {
+        ElectionManager manager = new ElectionManager(2, 3);
+
+        CoordinatorMessage current =
+                new CoordinatorMessage(
+                        "term-election-2",
+                        7,
+                        1
+                );
+
+        CoordinatorMessage stale =
+                new CoordinatorMessage(
+                        "term-election-3",
+                        4,
+                        2
+                );
+
+        assertTrue(manager.receiveCoordinator(current, 3L));
+        assertFalse(manager.receiveCoordinator(stale, 2L));
+
+        assertEquals(3L, manager.getCoordinatorTerm());
+        assertEquals(7, manager.getCoordinatorId());
+    }
+
+    @Test
+    void electionRequiresTermNewerThanCurrentTerm() {
+        ElectionManager manager = new ElectionManager(2, 3);
+
+        CoordinatorMessage message =
+                new CoordinatorMessage(
+                        "term-election-4",
+                        7,
+                        1
+                );
+
+        assertTrue(manager.receiveCoordinator(message, 4L));
+
+        assertFalse(manager.isValidElectionTerm(3L));
+        assertFalse(manager.isValidElectionTerm(4L));
+        assertTrue(manager.isValidElectionTerm(5L));
+        assertEquals(5L, manager.getNextCoordinatorTerm());
+    }
 }
