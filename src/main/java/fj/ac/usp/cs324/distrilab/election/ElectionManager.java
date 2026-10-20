@@ -7,6 +7,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class ElectionManager {
 
@@ -27,6 +28,9 @@ public class ElectionManager {
 
     private final AtomicInteger coordinatorJac =
             new AtomicInteger(0);
+
+    private final AtomicLong coordinatorTerm =
+            new AtomicLong(0L);
 
     private final AtomicInteger jobsInCurrentTerm =
             new AtomicInteger(0);
@@ -122,13 +126,33 @@ public class ElectionManager {
         );
     }
 
-    public boolean receiveCoordinator(
+    public synchronized boolean receiveCoordinator(
             CoordinatorMessage message
+    ) {
+        return receiveCoordinator(
+                message,
+                coordinatorTerm.get() + 1
+        );
+    }
+
+    public synchronized boolean receiveCoordinator(
+            CoordinatorMessage message,
+            long term
     ) {
         if (message == null) {
             throw new IllegalArgumentException(
                     "message cannot be null"
             );
+        }
+
+        if (term <= 0) {
+            throw new IllegalArgumentException(
+                    "coordinator term must be positive"
+            );
+        }
+
+        if (term <= coordinatorTerm.get()) {
+            return false;
         }
 
         boolean firstTimeReceived =
@@ -142,6 +166,7 @@ public class ElectionManager {
 
         coordinatorId.set(message.coordinatorId());
         coordinatorJac.set(message.coordinatorJac());
+        coordinatorTerm.set(term);
         jobsInCurrentTerm.set(0);
 
         return true;
@@ -170,6 +195,18 @@ public class ElectionManager {
 
     public int getCoordinatorJac() {
         return coordinatorJac.get();
+    }
+
+    public long getCoordinatorTerm() {
+        return coordinatorTerm.get();
+    }
+
+    public long getNextCoordinatorTerm() {
+        return coordinatorTerm.get() + 1;
+    }
+
+    public boolean isValidElectionTerm(long proposedTerm) {
+        return proposedTerm > coordinatorTerm.get();
     }
 
     public int getJobsInCurrentTerm() {
