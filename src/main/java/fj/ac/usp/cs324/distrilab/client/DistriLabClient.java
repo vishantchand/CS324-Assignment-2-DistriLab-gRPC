@@ -3,6 +3,8 @@ package fj.ac.usp.cs324.distrilab.client;
 import fj.ac.usp.cs324.distrilab.common.model.JobRequest;
 import fj.ac.usp.cs324.distrilab.common.model.JobResult;
 import fj.ac.usp.cs324.distrilab.common.model.JobType;
+import fj.ac.usp.cs324.distrilab.grpc.JobProgress;
+import fj.ac.usp.cs324.distrilab.grpc.WorkerProgress;
 
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
@@ -12,6 +14,7 @@ import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.JTextArea;
@@ -20,27 +23,36 @@ import javax.swing.SwingUtilities;
 import javax.swing.SwingWorker;
 import javax.swing.filechooser.FileNameExtensionFilter;
 import javax.swing.table.DefaultTableModel;
+import javax.swing.table.TableCellRenderer;
 import java.awt.BorderLayout;
+import java.awt.Component;
+import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.Insets;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.stream.Collectors;
 
 public final class DistriLabClient extends JFrame {
 
+    private static final int PROGRESS_COLUMN = 3;
+
     private final JTextField bootstrapHostField =
             new JTextField("localhost", 12);
 
     private final JTextField bootstrapPortField =
-            new JTextField("1099", 6);
+            new JTextField("50051", 6);
 
     private final JComboBox<JobType> jobTypeComboBox =
             new JComboBox<>(JobType.values());
@@ -69,6 +81,7 @@ public final class DistriLabClient extends JFrame {
                             "Job ID",
                             "Type",
                             "Status",
+                            "Progress",
                             "Result",
                             "Message"
                     },
@@ -81,7 +94,24 @@ public final class DistriLabClient extends JFrame {
                 ) {
                     return false;
                 }
+
+                @Override
+                public Class<?> getColumnClass(
+                        int columnIndex
+                ) {
+                    if (columnIndex == PROGRESS_COLUMN) {
+                        return Integer.class;
+                    }
+
+                    return Object.class;
+                }
             };
+
+    private final JTable resultTable =
+            new JTable(resultTableModel);
+
+    private final Map<String, JobProgress> latestJobProgress =
+            new HashMap<>();
 
     public DistriLabClient() {
         super("DistriLab Client");
@@ -93,7 +123,7 @@ public final class DistriLabClient extends JFrame {
 
     private void configureWindow() {
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setSize(950, 620);
+        setSize(1100, 650);
         setLocationRelativeTo(null);
 
         JPanel rootPanel = new JPanel(
@@ -114,11 +144,7 @@ public final class DistriLabClient extends JFrame {
                 BorderLayout.NORTH
         );
 
-        JTable resultTable =
-                new JTable(resultTableModel);
-
-        resultTable.setFillsViewportHeight(true);
-        resultTable.setAutoCreateRowSorter(true);
+        configureResultTable();
 
         rootPanel.add(
                 new JScrollPane(resultTable),
@@ -136,6 +162,51 @@ public final class DistriLabClient extends JFrame {
         );
 
         setContentPane(rootPanel);
+    }
+
+    private void configureResultTable() {
+        resultTable.setFillsViewportHeight(true);
+        resultTable.setAutoCreateRowSorter(true);
+        resultTable.setRowHeight(26);
+
+        resultTable.getColumnModel()
+                .getColumn(PROGRESS_COLUMN)
+                .setCellRenderer(new ProgressBarRenderer());
+
+        resultTable.getColumnModel()
+                .getColumn(PROGRESS_COLUMN)
+                .setPreferredWidth(130);
+
+        resultTable.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mouseClicked(MouseEvent event) {
+                int viewRow = resultTable.rowAtPoint(
+                        event.getPoint()
+                );
+
+                int viewColumn = resultTable.columnAtPoint(
+                        event.getPoint()
+                );
+
+                if (viewRow < 0 || viewColumn < 0) {
+                    return;
+                }
+
+                int modelRow =
+                        resultTable.convertRowIndexToModel(
+                                viewRow
+                        );
+
+                int modelColumn =
+                        resultTable.convertColumnIndexToModel(
+                                viewColumn
+                        );
+
+                if (modelColumn == PROGRESS_COLUMN) {
+                    showWorkerProgress(modelRow);
+                }
+            }
+        });
     }
 
     private JPanel createInputPanel() {
@@ -255,7 +326,7 @@ public final class DistriLabClient extends JFrame {
             GridBagConstraints constraints,
             int row,
             String label,
-            java.awt.Component component
+            Component component
     ) {
         constraints.gridx = 0;
         constraints.gridy = row;
@@ -407,6 +478,7 @@ public final class DistriLabClient extends JFrame {
                             request.jobId(),
                             request.jobType(),
                             "Running",
+                            0,
                             "",
                             "Submitted"
                     }
@@ -484,7 +556,7 @@ public final class DistriLabClient extends JFrame {
             JobRequest request,
             int tableRow
     ) {
-        SwingWorker<JobResult, Void> worker =
+        SwingWorker<JobResult, JobProgress> worker =
                 new SwingWorker<>() {
                     @Override
                     protected JobResult doInBackground()
@@ -495,7 +567,29 @@ public final class DistriLabClient extends JFrame {
                                         port
                                 );
 
-                        return connection.submitJob(request);
+                        return connection.submitJob(
+                                request,
+                                progress -> publish(progress)
+                        );
+                    }
+
+                    @Override
+                    protected void process(
+                            List<JobProgress> progressUpdates
+                    ) {
+                        if (progressUpdates.isEmpty()) {
+                            return;
+                        }
+
+                        JobProgress latest =
+                                progressUpdates.get(
+                                        progressUpdates.size() - 1
+                                );
+
+                        updateProgressRow(
+                                tableRow,
+                                latest
+                        );
                     }
 
                     @Override
@@ -521,6 +615,14 @@ public final class DistriLabClient extends JFrame {
                                     value,
                                     result.message()
                             );
+
+                            if (result.successful()) {
+                                resultTableModel.setValueAt(
+                                        100,
+                                        tableRow,
+                                        PROGRESS_COLUMN
+                                );
+                            }
 
                             statusLabel.setText(
                                     "Completed job "
@@ -561,6 +663,48 @@ public final class DistriLabClient extends JFrame {
         worker.execute();
     }
 
+    private void updateProgressRow(
+            int tableRow,
+            JobProgress progress
+    ) {
+        latestJobProgress.put(
+                progress.getJobId(),
+                progress
+        );
+
+        int percentage = clampPercentage(
+                progress.getOverallPercentage()
+        );
+
+        resultTableModel.setValueAt(
+                formatEnumName(progress.getState().name()),
+                tableRow,
+                2
+        );
+
+        resultTableModel.setValueAt(
+                percentage,
+                tableRow,
+                PROGRESS_COLUMN
+        );
+
+        if (!progress.getMessage().isBlank()) {
+            resultTableModel.setValueAt(
+                    progress.getMessage(),
+                    tableRow,
+                    5
+            );
+        }
+
+        statusLabel.setText(
+                "Job "
+                        + progress.getJobId()
+                        + ": "
+                        + percentage
+                        + "%"
+        );
+    }
+
     private void updateResultRow(
             int row,
             String status,
@@ -576,14 +720,121 @@ public final class DistriLabClient extends JFrame {
         resultTableModel.setValueAt(
                 value,
                 row,
-                3
+                4
         );
 
         resultTableModel.setValueAt(
                 message == null ? "" : message,
                 row,
-                4
+                5
         );
+    }
+
+    private void showWorkerProgress(int modelRow) {
+        String jobId = String.valueOf(
+                resultTableModel.getValueAt(
+                        modelRow,
+                        0
+                )
+        );
+
+        JobProgress progress =
+                latestJobProgress.get(jobId);
+
+        if (progress == null) {
+            JOptionPane.showMessageDialog(
+                    this,
+                    "No worker-level progress has been received yet.",
+                    "Worker Progress",
+                    JOptionPane.INFORMATION_MESSAGE
+            );
+            return;
+        }
+
+        DefaultTableModel workerModel =
+                new DefaultTableModel(
+                        new Object[]{
+                                "Worker",
+                                "Task",
+                                "State",
+                                "Completed",
+                                "Total",
+                                "Progress",
+                                "Partial Result",
+                                "Message"
+                        },
+                        0
+                ) {
+                    @Override
+                    public boolean isCellEditable(
+                            int row,
+                            int column
+                    ) {
+                        return false;
+                    }
+                };
+
+        for (WorkerProgress workerProgress
+                : progress.getWorkerProgressList()) {
+            workerModel.addRow(
+                    new Object[]{
+                            workerProgress.getWorkerId(),
+                            workerProgress.getTaskId(),
+                            formatEnumName(
+                                    workerProgress
+                                            .getState()
+                                            .name()
+                            ),
+                            workerProgress
+                                    .getCompletedWorkUnits(),
+                            workerProgress
+                                    .getTotalWorkUnits(),
+                            clampPercentage(
+                                    workerProgress.getPercentage()
+                            ) + "%",
+                            workerProgress.getPartialValue(),
+                            workerProgress.getMessage()
+                    }
+            );
+        }
+
+        JTable workerTable =
+                new JTable(workerModel);
+
+        workerTable.setFillsViewportHeight(true);
+        workerTable.setAutoCreateRowSorter(true);
+
+        JScrollPane scrollPane =
+                new JScrollPane(workerTable);
+
+        scrollPane.setPreferredSize(
+                new Dimension(850, 250)
+        );
+
+        JOptionPane.showMessageDialog(
+                this,
+                scrollPane,
+                "Worker progress - Job " + jobId,
+                JOptionPane.INFORMATION_MESSAGE
+        );
+    }
+
+    private static int clampPercentage(
+            double percentage
+    ) {
+        return (int) Math.round(
+                Math.max(
+                        0.0,
+                        Math.min(100.0, percentage)
+                )
+        );
+    }
+
+    private static String formatEnumName(String name) {
+        return name
+                .replace("JOB_STATE_", "")
+                .replace("TASK_STATE_", "")
+                .replace('_', ' ');
     }
 
     private List<Long> parseNumbers(
@@ -639,7 +890,7 @@ public final class DistriLabClient extends JFrame {
                         "Bootstrap port"
                 );
 
-        if (port < 1 || port > 65535) {
+        if (port < 1 || port > 65_535) {
             throw new IllegalArgumentException(
                     "Bootstrap port must be between "
                             + "1 and 65535"
@@ -663,6 +914,50 @@ public final class DistriLabClient extends JFrame {
                 "DistriLab Error",
                 JOptionPane.ERROR_MESSAGE
         );
+    }
+
+    private static final class ProgressBarRenderer
+            extends JProgressBar
+            implements TableCellRenderer {
+
+        private ProgressBarRenderer() {
+            super(0, 100);
+            setStringPainted(true);
+        }
+
+        @Override
+        public Component getTableCellRendererComponent(
+                JTable table,
+                Object value,
+                boolean isSelected,
+                boolean hasFocus,
+                int row,
+                int column
+        ) {
+            int percentage =
+                    value instanceof Number number
+                            ? clampPercentage(
+                            number.doubleValue()
+                    )
+                            : 0;
+
+            setValue(percentage);
+            setString(percentage + "%");
+
+            setBackground(
+                    isSelected
+                            ? table.getSelectionBackground()
+                            : table.getBackground()
+            );
+
+            setForeground(
+                    isSelected
+                            ? table.getSelectionForeground()
+                            : table.getForeground()
+            );
+
+            return this;
+        }
     }
 
     public static void main(String[] args) {
