@@ -14,7 +14,6 @@ import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
 import io.grpc.StatusRuntimeException;
 
-import java.rmi.RemoteException;
 import java.time.Duration;
 import java.util.Iterator;
 import java.util.List;
@@ -54,18 +53,18 @@ public final class ClientConnection {
         this.bootstrapPort = bootstrapPort;
     }
 
-    public JobResult submitJob(JobRequest request)
-            throws RemoteException {
-
-        return submitJob(request, progress -> {
-        });
+    public JobResult submitJob(JobRequest request) {
+        return submitJob(
+                request,
+                progress -> {
+                }
+        );
     }
 
     public JobResult submitJob(
             JobRequest request,
             Consumer<JobProgress> progressConsumer
-    ) throws RemoteException {
-
+    ) {
         Objects.requireNonNull(
                 request,
                 "Job request cannot be null"
@@ -86,7 +85,7 @@ public final class ClientConnection {
                     bootstrapClient.listActiveWorkers();
 
             if (workers.isEmpty()) {
-                throw new RemoteException(
+                throw new IllegalStateException(
                         "No active workers are available"
                 );
             }
@@ -105,12 +104,13 @@ public final class ClientConnection {
                 }
             }
 
-            throw new RemoteException(
-                    "Unable to submit the job through any active worker",
+            throw new IllegalStateException(
+                    "Unable to submit the job through "
+                            + "any active worker",
                     lastFailure
             );
         } catch (StatusRuntimeException exception) {
-            throw new RemoteException(
+            throw new IllegalStateException(
                     "Unable to contact the gRPC Bootstrap Node",
                     exception
             );
@@ -121,8 +121,7 @@ public final class ClientConnection {
             WorkerInfo worker,
             JobRequest request,
             Consumer<JobProgress> progressConsumer
-    ) throws RemoteException {
-
+    ) {
         ManagedChannel channel = ManagedChannelBuilder
                 .forAddress(
                         worker.getHost(),
@@ -146,10 +145,13 @@ public final class ClientConnection {
                     .submitJob(grpcRequest);
 
             if (!submissionReply.getAccepted()) {
-                throw new RemoteException(
+                String rejectionMessage =
                         submissionReply.getMessage().isBlank()
                                 ? "The job was rejected"
-                                : submissionReply.getMessage()
+                                : submissionReply.getMessage();
+
+                throw new IllegalStateException(
+                        rejectionMessage
                 );
             }
 
@@ -178,6 +180,10 @@ public final class ClientConnection {
                 }
             }
 
+            /*
+             * If the server closes the progress stream before sending
+             * the final result, retrieve the latest job state.
+             */
             JobSnapshot snapshot = stub
                     .withDeadlineAfter(
                             SUBMISSION_DEADLINE.toMillis(),
@@ -186,11 +192,14 @@ public final class ClientConnection {
                     .getJobStatus(progressRequest);
 
             if (snapshot.hasResult()) {
-                return fromGrpcResult(snapshot.getResult());
+                return fromGrpcResult(
+                        snapshot.getResult()
+                );
             }
 
-            throw new RemoteException(
-                    "The progress stream ended without a final result"
+            throw new IllegalStateException(
+                    "The progress stream ended without "
+                            + "a final result"
             );
         } finally {
             shutdownChannel(channel);
@@ -204,7 +213,9 @@ public final class ClientConnection {
         return fj.ac.usp.cs324.distrilab.grpc.JobRequest
                 .newBuilder()
                 .setJobId(request.jobId())
-                .setJobType(toGrpcJobType(request.jobType()))
+                .setJobType(
+                        toGrpcJobType(request.jobType())
+                )
                 .addAllNumbers(request.numbers())
                 .setRangeStart(request.rangeStart())
                 .setRangeEnd(request.rangeEnd())
@@ -232,23 +243,27 @@ public final class ClientConnection {
 
     private static JobType fromGrpcJobType(
             fj.ac.usp.cs324.distrilab.grpc.JobType jobType
-    ) throws RemoteException {
-
+    ) {
         return switch (jobType) {
-            case JOB_TYPE_MAX -> JobType.MAX;
-            case JOB_TYPE_PRIMESUM -> JobType.PRIMESUM;
-            case JOB_TYPE_PRIMECOUNT -> JobType.PRIMECOUNT;
+            case JOB_TYPE_MAX ->
+                    JobType.MAX;
 
-            default -> throw new RemoteException(
-                    "Received an unknown job type"
+            case JOB_TYPE_PRIMESUM ->
+                    JobType.PRIMESUM;
+
+            case JOB_TYPE_PRIMECOUNT ->
+                    JobType.PRIMECOUNT;
+
+            default -> throw new IllegalStateException(
+                    "Received an unknown job type: "
+                            + jobType
             );
         };
     }
 
     private static JobResult fromGrpcResult(
             fj.ac.usp.cs324.distrilab.grpc.JobResult result
-    ) throws RemoteException {
-
+    ) {
         return new JobResult(
                 result.getJobId(),
                 fromGrpcJobType(result.getJobType()),
