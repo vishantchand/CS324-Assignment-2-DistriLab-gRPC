@@ -1,23 +1,33 @@
 package fj.ac.usp.cs324.distrilab.client;
 
+import fj.ac.usp.cs324.distrilab.bootstrap.grpc.GrpcBootstrapClient;
 import fj.ac.usp.cs324.distrilab.common.model.JobRequest;
 import fj.ac.usp.cs324.distrilab.common.model.JobResult;
-import fj.ac.usp.cs324.distrilab.common.model.WorkerInfo;
-import fj.ac.usp.cs324.distrilab.common.rmi.BootstrapService;
-import fj.ac.usp.cs324.distrilab.common.rmi.WorkerService;
+import fj.ac.usp.cs324.distrilab.common.model.JobType;
+import fj.ac.usp.cs324.distrilab.grpc.JobIdRequest;
+import fj.ac.usp.cs324.distrilab.grpc.JobProgress;
+import fj.ac.usp.cs324.distrilab.grpc.JobServiceGrpc;
+import fj.ac.usp.cs324.distrilab.grpc.JobSnapshot;
+import fj.ac.usp.cs324.distrilab.grpc.JobSubmissionReply;
+import fj.ac.usp.cs324.distrilab.grpc.WorkerInfo;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
+import io.grpc.StatusRuntimeException;
 
-import java.rmi.RemoteException;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.registry.Registry;
-import java.util.LinkedHashMap;
+import java.time.Duration;
+import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 public final class ClientConnection {
 
-    private static final String BOOTSTRAP_BINDING =
-            "BootstrapService";
+    private static final Duration SUBMISSION_DEADLINE =
+            Duration.ofSeconds(5);
+
+    private static final Duration PROGRESS_DEADLINE =
+            Duration.ofMinutes(10);
 
     private final String bootstrapHost;
     private final int bootstrapPort;
@@ -33,7 +43,7 @@ public final class ClientConnection {
             );
         }
 
-        if (bootstrapPort < 1 || bootstrapPort > 65535) {
+        if (bootstrapPort < 1 || bootstrapPort > 65_535) {
             throw new IllegalArgumentException(
                     "Bootstrap port must be between 1 and 65535"
             );
@@ -43,140 +53,246 @@ public final class ClientConnection {
         this.bootstrapPort = bootstrapPort;
     }
 
-    public JobResult submitJob(JobRequest request)
-            throws RemoteException {
+    public JobResult submitJob(JobRequest request) {
+        return submitJob(
+                request,
+                progress -> {
+                }
+        );
+    }
+
+    public JobResult submitJob(
+            JobRequest request,
+            Consumer<JobProgress> progressConsumer
+    ) {
         Objects.requireNonNull(
                 request,
                 "Job request cannot be null"
         );
 
-        WorkerService workerService =
-                findReachableWorker();
-
-        return workerService.submitJob(request);
-    }
-
-    public WorkerInfo findReachableWorkerInfo()
-            throws RemoteException {
-        return findReachableWorkerConnection().workerInfo();
-    }
-
-    private WorkerService findReachableWorker()
-            throws RemoteException {
-        return findReachableWorkerConnection().workerService();
-    }
-
-    private WorkerConnection findReachableWorkerConnection()
-            throws RemoteException {
-        BootstrapService bootstrapService =
-                lookupBootstrapService();
-
-        Map<Integer, WorkerInfo> candidates =
-                new LinkedHashMap<>();
-
-        try {
-            WorkerInfo randomWorker =
-                    bootstrapService.getRandomWorker();
-
-            if (randomWorker != null) {
-                candidates.put(
-                        randomWorker.workerId(),
-                        randomWorker
-                );
-            }
-        } catch (Exception exception) {
-            System.err.println(
-                    "Random-worker discovery failed: "
-                            + exception.getMessage()
-            );
-        }
-
-        List<WorkerInfo> activeWorkers =
-                bootstrapService.getActiveWorkers();
-
-        for (WorkerInfo worker : activeWorkers) {
-            candidates.putIfAbsent(
-                    worker.workerId(),
-                    worker
-            );
-        }
-
-        if (candidates.isEmpty()) {
-            throw new RemoteException(
-                    "No active workers are registered"
-            );
-        }
-
-        Exception lastFailure = null;
-
-        for (WorkerInfo worker : candidates.values()) {
-            try {
-                Registry workerRegistry =
-                        LocateRegistry.getRegistry(
-                                worker.host(),
-                                worker.registryPort()
-                        );
-
-                WorkerService workerService =
-                        (WorkerService) workerRegistry.lookup(
-                                worker.bindingName()
-                        );
-
-                if (workerService.ping()) {
-                    return new WorkerConnection(
-                            worker,
-                            workerService
-                    );
-                }
-            } catch (Exception exception) {
-                lastFailure = exception;
-
-                System.err.println(
-                        "Worker "
-                                + worker.workerId()
-                                + " is unavailable: "
-                                + exception.getMessage()
-                );
-            }
-        }
-
-        RemoteException exception = new RemoteException(
-                "No registered worker is reachable"
+        Objects.requireNonNull(
+                progressConsumer,
+                "progressConsumer cannot be null"
         );
 
-        if (lastFailure != null) {
-            exception.initCause(lastFailure);
-        }
+        try (GrpcBootstrapClient bootstrapClient =
+                     new GrpcBootstrapClient(
+                             bootstrapHost,
+                             bootstrapPort
+                     )) {
 
-        throw exception;
-    }
+            List<WorkerInfo> workers =
+                    bootstrapClient.listActiveWorkers();
 
-    private BootstrapService lookupBootstrapService()
-            throws RemoteException {
-        try {
-            Registry registry =
-                    LocateRegistry.getRegistry(
-                            bootstrapHost,
-                            bootstrapPort
+            if (workers.isEmpty()) {
+                throw new IllegalStateException(
+                        "No active workers are available"
+                );
+            }
+
+            StatusRuntimeException lastFailure = null;
+
+            for (WorkerInfo worker : workers) {
+                try {
+                    return submitThroughWorker(
+                            worker,
+                            request,
+                            progressConsumer
                     );
+                } catch (StatusRuntimeException exception) {
+                    lastFailure = exception;
+                }
+            }
 
-            return (BootstrapService) registry.lookup(
-                    BOOTSTRAP_BINDING
+            throw new IllegalStateException(
+                    "Unable to submit the job through "
+                            + "any active worker",
+                    lastFailure
             );
-        } catch (Exception exception) {
-            throw new RemoteException(
-                    "Unable to connect to Bootstrap Node at "
-                            + bootstrapHost
-                            + ":"
-                            + bootstrapPort,
+        } catch (StatusRuntimeException exception) {
+            throw new IllegalStateException(
+                    "Unable to contact the gRPC Bootstrap Node",
                     exception
             );
         }
     }
 
-    private record WorkerConnection(
-            WorkerInfo workerInfo,
-            WorkerService workerService
+    private JobResult submitThroughWorker(
+            WorkerInfo worker,
+            JobRequest request,
+            Consumer<JobProgress> progressConsumer
     ) {
+        ManagedChannel channel = ManagedChannelBuilder
+                .forAddress(
+                        worker.getHost(),
+                        worker.getGrpcPort()
+                )
+                .usePlaintext()
+                .build();
+
+        try {
+            JobServiceGrpc.JobServiceBlockingStub stub =
+                    JobServiceGrpc.newBlockingStub(channel);
+
+            fj.ac.usp.cs324.distrilab.grpc.JobRequest grpcRequest =
+                    toGrpcRequest(request);
+
+            JobSubmissionReply submissionReply = stub
+                    .withDeadlineAfter(
+                            SUBMISSION_DEADLINE.toMillis(),
+                            TimeUnit.MILLISECONDS
+                    )
+                    .submitJob(grpcRequest);
+
+            if (!submissionReply.getAccepted()) {
+                String rejectionMessage =
+                        submissionReply.getMessage().isBlank()
+                                ? "The job was rejected"
+                                : submissionReply.getMessage();
+
+                throw new IllegalStateException(
+                        rejectionMessage
+                );
+            }
+
+            JobIdRequest progressRequest =
+                    JobIdRequest.newBuilder()
+                            .setJobId(request.jobId())
+                            .build();
+
+            Iterator<JobProgress> progressUpdates = stub
+                    .withDeadlineAfter(
+                            PROGRESS_DEADLINE.toMillis(),
+                            TimeUnit.MILLISECONDS
+                    )
+                    .streamJobProgress(progressRequest);
+
+            while (progressUpdates.hasNext()) {
+                JobProgress progress =
+                        progressUpdates.next();
+
+                progressConsumer.accept(progress);
+
+                if (progress.hasResult()) {
+                    return fromGrpcResult(
+                            progress.getResult()
+                    );
+                }
+            }
+
+            /*
+             * If the server closes the progress stream before sending
+             * the final result, retrieve the latest job state.
+             */
+            JobSnapshot snapshot = stub
+                    .withDeadlineAfter(
+                            SUBMISSION_DEADLINE.toMillis(),
+                            TimeUnit.MILLISECONDS
+                    )
+                    .getJobStatus(progressRequest);
+
+            if (snapshot.hasResult()) {
+                return fromGrpcResult(
+                        snapshot.getResult()
+                );
+            }
+
+            throw new IllegalStateException(
+                    "The progress stream ended without "
+                            + "a final result"
+            );
+        } finally {
+            shutdownChannel(channel);
+        }
+    }
+
+    private static
+    fj.ac.usp.cs324.distrilab.grpc.JobRequest
+    toGrpcRequest(JobRequest request) {
+
+        return fj.ac.usp.cs324.distrilab.grpc.JobRequest
+                .newBuilder()
+                .setJobId(request.jobId())
+                .setJobType(
+                        toGrpcJobType(request.jobType())
+                )
+                .addAllNumbers(request.numbers())
+                .setRangeStart(request.rangeStart())
+                .setRangeEnd(request.rangeEnd())
+                .build();
+    }
+
+    private static
+    fj.ac.usp.cs324.distrilab.grpc.JobType
+    toGrpcJobType(JobType jobType) {
+
+        return switch (jobType) {
+            case MAX ->
+                    fj.ac.usp.cs324.distrilab.grpc.JobType
+                            .JOB_TYPE_MAX;
+
+            case PRIMESUM ->
+                    fj.ac.usp.cs324.distrilab.grpc.JobType
+                            .JOB_TYPE_PRIMESUM;
+
+            case PRIMECOUNT ->
+                    fj.ac.usp.cs324.distrilab.grpc.JobType
+                            .JOB_TYPE_PRIMECOUNT;
+        };
+    }
+
+    private static JobType fromGrpcJobType(
+            fj.ac.usp.cs324.distrilab.grpc.JobType jobType
+    ) {
+        return switch (jobType) {
+            case JOB_TYPE_MAX ->
+                    JobType.MAX;
+
+            case JOB_TYPE_PRIMESUM ->
+                    JobType.PRIMESUM;
+
+            case JOB_TYPE_PRIMECOUNT ->
+                    JobType.PRIMECOUNT;
+
+            default -> throw new IllegalStateException(
+                    "Received an unknown job type: "
+                            + jobType
+            );
+        };
+    }
+
+    private static JobResult fromGrpcResult(
+            fj.ac.usp.cs324.distrilab.grpc.JobResult result
+    ) {
+        return new JobResult(
+                result.getJobId(),
+                fromGrpcJobType(result.getJobType()),
+                result.getValue(),
+                result.getSuccessful(),
+                result.getMessage()
+        );
+    }
+
+    private static void shutdownChannel(
+            ManagedChannel channel
+    ) {
+        channel.shutdown();
+
+        try {
+            if (!channel.awaitTermination(
+                    2,
+                    TimeUnit.SECONDS
+            )) {
+                channel.shutdownNow();
+
+                channel.awaitTermination(
+                        2,
+                        TimeUnit.SECONDS
+                );
+            }
+        } catch (InterruptedException exception) {
+            channel.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
     }
 }

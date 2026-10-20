@@ -27,12 +27,22 @@ public final class GrpcBootstrapClient implements AutoCloseable {
             Duration.ofSeconds(3);
 
     private final ManagedChannel channel;
-    private final BootstrapServiceGrpc.BootstrapServiceBlockingStub stub;
+
+    private final
+    BootstrapServiceGrpc.BootstrapServiceBlockingStub stub;
+
     private final Duration deadline;
     private final boolean ownsChannel;
 
-    public GrpcBootstrapClient(String host, int port) {
-        this(host, port, DEFAULT_DEADLINE);
+    public GrpcBootstrapClient(
+            String host,
+            int port
+    ) {
+        this(
+                host,
+                port,
+                DEFAULT_DEADLINE
+        );
     }
 
     public GrpcBootstrapClient(
@@ -41,7 +51,11 @@ public final class GrpcBootstrapClient implements AutoCloseable {
             Duration deadline
     ) {
         this(
-                createChannel(host, port),
+                createValidatedChannel(
+                        host,
+                        port,
+                        deadline
+                ),
                 deadline,
                 true
         );
@@ -51,7 +65,11 @@ public final class GrpcBootstrapClient implements AutoCloseable {
             ManagedChannel channel,
             Duration deadline
     ) {
-        this(channel, deadline, false);
+        this(
+                channel,
+                deadline,
+                false
+        );
     }
 
     private GrpcBootstrapClient(
@@ -67,10 +85,15 @@ public final class GrpcBootstrapClient implements AutoCloseable {
         this.deadline = validateDeadline(deadline);
         this.ownsChannel = ownsChannel;
 
-        stub = BootstrapServiceGrpc.newBlockingStub(channel);
+        this.stub =
+                BootstrapServiceGrpc.newBlockingStub(
+                        channel
+                );
     }
 
-    public RegisterWorkerReply registerWorker(WorkerInfo worker) {
+    public RegisterWorkerReply registerWorker(
+            WorkerInfo worker
+    ) {
         Objects.requireNonNull(
                 worker,
                 "worker cannot be null"
@@ -79,29 +102,36 @@ public final class GrpcBootstrapClient implements AutoCloseable {
         return deadlineStub().registerWorker(worker);
     }
 
-    public Acknowledgement unregisterWorker(int workerId) {
+    public Acknowledgement unregisterWorker(
+            int workerId
+    ) {
         validateWorkerId(workerId);
 
-        WorkerIdRequest request = WorkerIdRequest.newBuilder()
-                .setWorkerId(workerId)
-                .build();
+        WorkerIdRequest request =
+                WorkerIdRequest.newBuilder()
+                        .setWorkerId(workerId)
+                        .build();
 
         return deadlineStub().unregisterWorker(request);
     }
 
     public List<WorkerInfo> listActiveWorkers() {
-        WorkerList reply = deadlineStub().listActiveWorkers(
-                Empty.getDefaultInstance()
-        );
+        WorkerList reply =
+                deadlineStub().listActiveWorkers(
+                        Empty.getDefaultInstance()
+                );
 
-        return List.copyOf(reply.getWorkersList());
+        return List.copyOf(
+                reply.getWorkersList()
+        );
     }
 
     public Optional<WorkerInfo> getRandomWorker() {
         try {
-            WorkerInfo worker = deadlineStub().getRandomWorker(
-                    Empty.getDefaultInstance()
-            );
+            WorkerInfo worker =
+                    deadlineStub().getRandomWorker(
+                            Empty.getDefaultInstance()
+                    );
 
             return Optional.of(worker);
         } catch (StatusRuntimeException exception) {
@@ -131,10 +161,11 @@ public final class GrpcBootstrapClient implements AutoCloseable {
         channel.shutdown();
 
         try {
-            boolean terminated = channel.awaitTermination(
-                    SHUTDOWN_TIMEOUT.toMillis(),
-                    TimeUnit.MILLISECONDS
-            );
+            boolean terminated =
+                    channel.awaitTermination(
+                            SHUTDOWN_TIMEOUT.toMillis(),
+                            TimeUnit.MILLISECONDS
+                    );
 
             if (!terminated) {
                 channel.shutdownNow();
@@ -150,11 +181,30 @@ public final class GrpcBootstrapClient implements AutoCloseable {
         }
     }
 
-    private BootstrapServiceGrpc.BootstrapServiceBlockingStub
+    private
+    BootstrapServiceGrpc.BootstrapServiceBlockingStub
     deadlineStub() {
         return stub.withDeadlineAfter(
                 deadline.toMillis(),
                 TimeUnit.MILLISECONDS
+        );
+    }
+
+    /*
+     * Validate the complete configuration before allocating
+     * a ManagedChannel. This prevents a channel from being
+     * leaked when the deadline is invalid.
+     */
+    private static ManagedChannel createValidatedChannel(
+            String host,
+            int port,
+            Duration deadline
+    ) {
+        validateDeadline(deadline);
+
+        return createChannel(
+                host,
+                port
         );
     }
 
@@ -175,18 +225,24 @@ public final class GrpcBootstrapClient implements AutoCloseable {
         }
 
         return ManagedChannelBuilder
-                .forAddress(host.trim(), port)
+                .forAddress(
+                        host.trim(),
+                        port
+                )
                 .usePlaintext()
                 .build();
     }
 
-    private static Duration validateDeadline(Duration deadline) {
+    private static Duration validateDeadline(
+            Duration deadline
+    ) {
         Objects.requireNonNull(
                 deadline,
                 "deadline cannot be null"
         );
 
-        if (deadline.isZero() || deadline.isNegative()) {
+        if (deadline.isZero()
+                || deadline.isNegative()) {
             throw new IllegalArgumentException(
                     "deadline must be greater than zero"
             );
@@ -195,7 +251,9 @@ public final class GrpcBootstrapClient implements AutoCloseable {
         return deadline;
     }
 
-    private static void validateWorkerId(int workerId) {
+    private static void validateWorkerId(
+            int workerId
+    ) {
         if (workerId <= 0) {
             throw new IllegalArgumentException(
                     "workerId must be greater than zero"
